@@ -1,0 +1,33 @@
+# HyperSpec Analyzer - Dependencies
+# Version: 0.5.0
+
+# Core scientific computing
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+
+# Image processing
+scikit-image>=0.20.0
+Pillow>=9.5.0
+tifffile>=2023.4.12
+
+# Visualization
+matplotlib>=3.7.0
+
+# GUI framework
+PySide6>=6.5.0
+
+# Nanosurf file support
+NSFopen>=1.0.0
+
+# Optional: Enhanced functionality
+h5py>=3.8.0
+openpyxl>=3.1.0
+
+# Testing
+pytest>=7.3.0
+pytest-cov>=4.1.0
+
+# Optional: macOS dock icon support
+# Uncomment if needed on macOS:
+# pyobjc-framework-Cocoa>=9.0; sys_platform == 'darwin'
