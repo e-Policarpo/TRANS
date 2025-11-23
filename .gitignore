@@ -49,6 +49,12 @@ Thumbs.db
 *.nid
 *.dat
 
+# Output files (generated data - don't track)
+data/*/output/
+**/output/*.csv
+**/output/*.tiff
+**/output/*.png
+
 # Backup files
 backup_*/
 
