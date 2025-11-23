@@ -46,6 +46,12 @@ from ..processing.map_generator import MapGenerator
 from ..processing.integration import IntegrationProcessor
 import setproctitle
 
+# Matplotlib for curve visualization
+import matplotlib
+matplotlib.use('Qt5Agg')
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
 setproctitle.setproctitle("TRANS")
 
 logger = logging.getLogger(__name__)
@@ -69,6 +75,11 @@ class MainWindow(QMainWindow):
         self.discretized_data: Dict[str, SpectralData] = {}
         self.current_data_type: str = 'unknown'
         self.current_plugin: str = 'sts'  # Default to STS
+
+        # Grid dimensions for hyperspectral map
+        self.grid_horizontal: Optional[int] = None  # Number of points horizontally
+        self.grid_vertical: Optional[int] = None    # Number of points vertically
+        self.grid_dimensions_set: bool = False       # Track if dimensions have been set
         
         # Processing modules
         self.derivatives_processor = DerivativesProcessor()
@@ -191,6 +202,9 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Ready")
         self.status_bar.addPermanentWidget(self.status_label)
 
+        # Initialize UI state (disable discretization until grid dimensions set)
+        self.enable_discretization_ui(False)
+
     def create_menu_bar(self):
         """Create menu bar with unified import system."""
         menubar = self.menuBar()
@@ -259,14 +273,24 @@ class MainWindow(QMainWindow):
         # Data info section
         info_group = QGroupBox("📊 Data Info")
         info_layout = QVBoxLayout()
-        
+
         self.data_type_label = QLabel("Data type: Not loaded")
         self.data_type_label.setStyleSheet("font-weight: bold;")
         info_layout.addWidget(self.data_type_label)
-        
+
         self.data_stats_label = QLabel("Spectra: 0 | Points: 0")
         info_layout.addWidget(self.data_stats_label)
-        
+
+        # Grid dimensions display and button
+        self.grid_dims_label = QLabel("Grid: Not set")
+        self.grid_dims_label.setStyleSheet("color: #cc0000; font-weight: bold;")
+        info_layout.addWidget(self.grid_dims_label)
+
+        self.set_grid_btn = QPushButton("⚙️ Set Grid Dimensions")
+        self.set_grid_btn.clicked.connect(self.prompt_grid_dimensions)
+        self.set_grid_btn.setToolTip("Specify the horizontal × vertical grid size for the hyperspectral map")
+        info_layout.addWidget(self.set_grid_btn)
+
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
         
@@ -384,26 +408,34 @@ class MainWindow(QMainWindow):
         # Discretization
         discretize_group = QGroupBox("Spatial Discretization")
         discretize_layout = QGridLayout()
-        
-        discretize_layout.addWidget(QLabel("Block Width:"), 0, 0)
+
+        discretize_layout.addWidget(QLabel("Horizontal Blocks:"), 0, 0)
+        self.num_blocks_h_spin = QSpinBox()
+        self.num_blocks_h_spin.setRange(1, 100)
+        self.num_blocks_h_spin.setValue(5)
+        self.num_blocks_h_spin.setToolTip("Number of blocks to divide the grid into horizontally")
+        discretize_layout.addWidget(self.num_blocks_h_spin, 0, 1)
+
+        discretize_layout.addWidget(QLabel("Vertical Blocks:"), 1, 0)
+        self.num_blocks_v_spin = QSpinBox()
+        self.num_blocks_v_spin.setRange(1, 100)
+        self.num_blocks_v_spin.setValue(5)
+        self.num_blocks_v_spin.setToolTip("Number of blocks to divide the grid into vertically")
+        discretize_layout.addWidget(self.num_blocks_v_spin, 1, 1)
+
+        # Keep old spin boxes for backward compatibility (hidden, used internally)
         self.block_h_spin = QSpinBox()
-        self.block_h_spin.setRange(1, 100)
-        self.block_h_spin.setValue(10)
-        discretize_layout.addWidget(self.block_h_spin, 0, 1)
-        
-        discretize_layout.addWidget(QLabel("Block Height:"), 1, 0)
+        self.block_h_spin.setVisible(False)
         self.block_v_spin = QSpinBox()
-        self.block_v_spin.setRange(1, 100)
-        self.block_v_spin.setValue(10)
-        discretize_layout.addWidget(self.block_v_spin, 1, 1)
-        
+        self.block_v_spin.setVisible(False)
+
         self.ignore_empty_check = QCheckBox("Ignore Empty Blocks")
         self.ignore_empty_check.setChecked(True)
         discretize_layout.addWidget(self.ignore_empty_check, 2, 0, 1, 2)
-        
+
         self.use_selection_check = QCheckBox("Use Selection Only")
         discretize_layout.addWidget(self.use_selection_check, 3, 0, 1, 2)
-        
+
         self.discretize_btn = QPushButton("⊞ Apply Discretization")
         self.discretize_btn.clicked.connect(self.apply_discretization)
         discretize_layout.addWidget(self.discretize_btn, 4, 0, 1, 2)
@@ -638,36 +670,39 @@ class MainWindow(QMainWindow):
         return panel
 
     def setup_spectrum_viewer(self):
-        """Setup spectrum viewer tab."""
+        """Setup spectrum viewer tab for selected block curves."""
         layout = QVBoxLayout(self.spectrum_viewer)
-        
+
         # Controls
         controls_layout = QHBoxLayout()
-        
-        controls_layout.addWidget(QLabel("Spectrum:"))
+
+        controls_layout.addWidget(QLabel("Curve Type:"))
+        self.curve_type_combo = QComboBox()
+        self.curve_type_combo.addItems(["I-V Curves", "dI/dV (First Derivative)", "d²I/dV² (Second Derivative)", "Corrected dI/dV"])
+        self.curve_type_combo.currentTextChanged.connect(self.update_spectrum_plot)
+        controls_layout.addWidget(self.curve_type_combo)
+
+        # Keep old combo for backward compatibility
         self.spectrum_combo = QComboBox()
-        self.spectrum_combo.currentTextChanged.connect(self.update_spectrum_plot)
-        controls_layout.addWidget(self.spectrum_combo)
-        
+        self.spectrum_combo.setVisible(False)
         self.spectrum_type_combo = QComboBox()
-        self.spectrum_type_combo.addItems(["Raw Data", "First Derivative", "Second Derivative"])
-        self.spectrum_type_combo.currentTextChanged.connect(self.update_spectrum_plot)
-        controls_layout.addWidget(self.spectrum_type_combo)
-        
-        self.plot_btn = QPushButton("📊 Plot")
+        self.spectrum_type_combo.setVisible(False)
+
+        self.plot_btn = QPushButton("🔄 Refresh Plot")
         self.plot_btn.clicked.connect(self.update_spectrum_plot)
         controls_layout.addWidget(self.plot_btn)
-        
+
         controls_layout.addStretch()
         layout.addLayout(controls_layout)
-        
-        # Plot area placeholder
-        self.spectrum_plot_widget = QWidget()
-        self.spectrum_plot_layout = QVBoxLayout(self.spectrum_plot_widget)
-        layout.addWidget(self.spectrum_plot_widget)
-        
+
+        # Create matplotlib figure and canvas
+        self.curve_figure = Figure(figsize=(8, 6), dpi=100)
+        self.curve_canvas = FigureCanvas(self.curve_figure)
+        layout.addWidget(self.curve_canvas)
+
         # Info label
-        self.spectrum_info_label = QLabel("Select a spectrum and click 'Plot' to view")
+        self.spectrum_info_label = QLabel("Select blocks in the Image Visualization tab to see curves here")
+        self.spectrum_info_label.setStyleSheet("color: #666; font-style: italic;")
         layout.addWidget(self.spectrum_info_label)
 
     def create_info_panel(self) -> QWidget:
@@ -925,6 +960,94 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(timeout, lambda: self.status_label.setText("Ready"))
 
     # ========================================================================
+    # GRID DIMENSIONS MANAGEMENT
+    # ========================================================================
+
+    def prompt_grid_dimensions(self):
+        """
+        Prompt user to input grid dimensions (H x V points).
+        This is the size of the hyperspectral map grid.
+        """
+        from PySide6.QtWidgets import QDialog, QFormLayout, QSpinBox, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set Grid Dimensions")
+        dialog.setModal(True)
+
+        layout = QFormLayout()
+
+        # Horizontal dimension
+        h_spin = QSpinBox()
+        h_spin.setMinimum(1)
+        h_spin.setMaximum(1000)
+        h_spin.setValue(self.grid_horizontal if self.grid_horizontal else 10)
+        h_spin.setToolTip("Number of measurement points horizontally")
+        layout.addRow("Horizontal Points:", h_spin)
+
+        # Vertical dimension
+        v_spin = QSpinBox()
+        v_spin.setMinimum(1)
+        v_spin.setMaximum(1000)
+        v_spin.setValue(self.grid_vertical if self.grid_vertical else 10)
+        v_spin.setToolTip("Number of measurement points vertically")
+        layout.addRow("Vertical Points:", v_spin)
+
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        dialog.setLayout(layout)
+
+        if dialog.exec():
+            self.grid_horizontal = h_spin.value()
+            self.grid_vertical = v_spin.value()
+            self.grid_dimensions_set = True
+
+            # Update UI
+            self.update_grid_dimensions_ui()
+
+            logger.info(f"Grid dimensions set to {self.grid_horizontal} × {self.grid_vertical}")
+            self.update_status(f"Grid dimensions set: {self.grid_horizontal} × {self.grid_vertical}", 3000)
+
+    def update_grid_dimensions_ui(self):
+        """Update UI elements based on grid dimensions state."""
+        if self.grid_dimensions_set:
+            # Update label
+            self.grid_dims_label.setText(f"Grid: {self.grid_horizontal} × {self.grid_vertical}")
+            self.grid_dims_label.setStyleSheet("color: #00aa00; font-weight: bold;")
+
+            # Enable discretization-related UI elements
+            self.enable_discretization_ui(True)
+        else:
+            # Reset label
+            self.grid_dims_label.setText("Grid: Not set")
+            self.grid_dims_label.setStyleSheet("color: #cc0000; font-weight: bold;")
+
+            # Disable discretization-related UI elements
+            self.enable_discretization_ui(False)
+
+    def enable_discretization_ui(self, enabled: bool):
+        """
+        Enable or disable discretization-related UI elements.
+
+        Parameters:
+        -----------
+        enabled : bool
+            Whether to enable or disable the UI elements
+        """
+        # These will be set when we create them in the next steps
+        if hasattr(self, 'discretize_btn'):
+            self.discretize_btn.setEnabled(enabled)
+        if hasattr(self, 'export_discretized_btn'):
+            self.export_discretized_btn.setEnabled(enabled)
+        if hasattr(self, 'block_h_spin'):
+            self.block_h_spin.setEnabled(enabled)
+        if hasattr(self, 'block_v_spin'):
+            self.block_v_spin.setEnabled(enabled)
+
+    # ========================================================================
     # EXISTING METHODS (updated for new UI)
     # ========================================================================
 
@@ -1010,7 +1133,22 @@ class MainWindow(QMainWindow):
                 "Success",
                 f"Loaded {spectral_data.num_spectra} {self.current_data_type.upper()} spectra from {directory.name}"
             )
-            
+
+            # Prompt for grid dimensions for STS data
+            if self.current_plugin == 'sts' and not self.grid_dimensions_set:
+                response = QMessageBox.question(
+                    self,
+                    "Set Grid Dimensions",
+                    "Would you like to set the hyperspectral grid dimensions now?\n\n"
+                    "This is required for discretization and map generation.\n"
+                    "You can also set it later using the '⚙️ Set Grid Dimensions' button.",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+
+                if response == QMessageBox.Yes:
+                    self.prompt_grid_dimensions()
+
         except Exception as e:
             logger.error(f"Error loading directory: {e}", exc_info=True)
             QMessageBox.critical(self, "Error", f"Failed to load data:\n{str(e)}")
@@ -1523,9 +1661,77 @@ class MainWindow(QMainWindow):
         pass
 
     def apply_discretization(self):
-        """Apply spatial discretization."""
-        # Keep existing implementation
-        pass
+        """
+        Apply spatial discretization to topography and spectral data.
+        Converts number of blocks to block sizes based on grid dimensions.
+        """
+        if not self.grid_dimensions_set:
+            QMessageBox.warning(
+                self,
+                "Grid Dimensions Required",
+                "Please set grid dimensions first using the '⚙️ Set Grid Dimensions' button."
+            )
+            return
+
+        if self.topography_data is None:
+            QMessageBox.warning(self, "Warning", "No topography data loaded")
+            return
+
+        try:
+            # Get number of blocks from UI
+            num_blocks_h = self.num_blocks_h_spin.value()
+            num_blocks_v = self.num_blocks_v_spin.value()
+
+            # Calculate block sizes from grid dimensions and number of blocks
+            block_size_h = self.grid_horizontal // num_blocks_h
+            block_size_v = self.grid_vertical // num_blocks_v
+
+            if block_size_h < 1 or block_size_v < 1:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Block Size",
+                    f"Grid dimensions ({self.grid_horizontal} × {self.grid_vertical}) "
+                    f"cannot be divided into {num_blocks_h} × {num_blocks_v} blocks.\n\n"
+                    f"Calculated block size would be {block_size_h} × {block_size_v}."
+                )
+                return
+
+            # Update internal block size spin boxes for backward compatibility
+            self.block_h_spin.setValue(block_size_h)
+            self.block_v_spin.setValue(block_size_v)
+
+            self.show_progress("Applying discretization...")
+
+            # Apply discretization to topography
+            self.topography_data.discretize(
+                block_size=(block_size_v, block_size_h),
+                ignore_empty=self.ignore_empty_check.isChecked()
+            )
+
+            # Update topography visualization with grid
+            self.topography_widget.set_topography(self.topography_data)
+
+            self.hide_progress()
+
+            # Show success message
+            actual_blocks_h = self.grid_horizontal // block_size_h
+            actual_blocks_v = self.grid_vertical // block_size_v
+            total_blocks = actual_blocks_h * actual_blocks_v
+
+            QMessageBox.information(
+                self,
+                "Discretization Applied",
+                f"Grid discretized into {actual_blocks_h} × {actual_blocks_v} = {total_blocks} blocks\n"
+                f"Block size: {block_size_h} × {block_size_v} points"
+            )
+
+            logger.info(f"Discretization applied: {num_blocks_h}×{num_blocks_v} blocks ({block_size_h}×{block_size_v} each)")
+            self.update_status(f"Discretization: {total_blocks} blocks", 3000)
+
+        except Exception as e:
+            self.hide_progress()
+            QMessageBox.critical(self, "Error", f"Failed to apply discretization: {str(e)}")
+            logger.error(f"Error applying discretization: {e}", exc_info=True)
 
     def truncate_range(self):
         """Truncate spectral data range."""
@@ -1682,10 +1888,147 @@ class MainWindow(QMainWindow):
         # Keep existing implementation
         pass
 
+    def on_selection_changed(self, selected_blocks: List[Tuple[int, int]]):
+        """
+        Handle block selection changes from topography widget.
+
+        Parameters:
+        -----------
+        selected_blocks : List[Tuple[int, int]]
+            List of selected block indices as (h_group, v_group)
+        """
+        logger.info(f"Block selection changed: {len(selected_blocks)} blocks selected")
+
+        # Update info label
+        if not selected_blocks:
+            self.spectrum_info_label.setText("No blocks selected. Click on blocks in the Image Visualization tab.")
+            self.spectrum_info_label.setStyleSheet("color: #666; font-style: italic;")
+        else:
+            self.spectrum_info_label.setText(f"Selected {len(selected_blocks)} block(s) - showing averaged curves")
+            self.spectrum_info_label.setStyleSheet("color: #007700; font-weight: bold;")
+
+        # Update plot
+        self.update_spectrum_plot()
+
     def update_spectrum_plot(self):
-        """Update spectrum plot."""
-        # Keep existing implementation
-        pass
+        """
+        Update spectrum plot showing curves for selected blocks.
+        If multiple blocks selected, shows averaged curve.
+        """
+        # Clear previous plot
+        self.curve_figure.clear()
+
+        # Get selected blocks
+        if not hasattr(self, 'topography_widget'):
+            return
+
+        selected_blocks = self.topography_widget.get_selected_blocks()
+
+        if not selected_blocks or self.spectral_data is None:
+            # Show message
+            ax = self.curve_figure.add_subplot(111)
+            ax.text(0.5, 0.5, 'No blocks selected\n\nSelect blocks in Image Visualization',
+                   ha='center', va='center', fontsize=12, color='gray')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            self.curve_canvas.draw()
+            return
+
+        try:
+            # Get curve type
+            curve_type = self.curve_type_combo.currentText()
+
+            # Determine which data to plot
+            if "I-V" in curve_type:
+                data = self.spectral_data
+                ylabel = "Current (A)"
+                title = "I-V Curves"
+            elif "First" in curve_type or "dI/dV" in curve_type:
+                if "first" in self.derivatives or "corrected" in self.derivatives:
+                    # Check if corrected requested
+                    if "Corrected" in curve_type and "corrected" in self.derivatives:
+                        data = self.derivatives["corrected"]
+                        ylabel = "dI/dV (corrected)"
+                        title = "Baseline-Corrected dI/dV"
+                    elif "first" in self.derivatives:
+                        data = self.derivatives["first"]
+                        ylabel = "dI/dV (A/V)"
+                        title = "First Derivative (dI/dV)"
+                    else:
+                        self.show_message_on_plot("First derivative not calculated.\nUse 'Calculate Derivatives' first.")
+                        return
+                else:
+                    self.show_message_on_plot("Derivatives not calculated.\nUse 'Calculate Derivatives' first.")
+                    return
+            elif "Second" in curve_type or "d²I/dV²" in curve_type:
+                if "second" in self.derivatives:
+                    data = self.derivatives["second"]
+                    ylabel = "d²I/dV² (A/V²)"
+                    title = "Second Derivative (d²I/dV²)"
+                else:
+                    self.show_message_on_plot("Second derivative not calculated.\nUse 'Calculate Derivatives' first.")
+                    return
+            else:
+                data = self.spectral_data
+                ylabel = "Current (A)"
+                title = "I-V Curves"
+
+            # Extract and average spectra for selected blocks
+            V = data.independent_var
+            spectra_to_plot = []
+
+            # Convert block indices to column indices
+            # Blocks are stored in H→V order (column-by-column)
+            for h_group, v_group in selected_blocks:
+                # Calculate block index in discretization order
+                if self.topography_data and self.topography_data.discretized_data is not None:
+                    n_blocks_v = self.topography_data.discretized_data.shape[0]
+                    block_idx = h_group * n_blocks_v + v_group
+
+                    # Get spectrum column (add 1 to skip V column)
+                    if block_idx < data.num_spectra:
+                        spectrum = data.data.iloc[:, block_idx + 1].values
+                        spectra_to_plot.append(spectrum)
+
+            if not spectra_to_plot:
+                self.show_message_on_plot("No valid spectra found for selected blocks")
+                return
+
+            # Average if multiple blocks
+            if len(spectra_to_plot) > 1:
+                averaged_spectrum = np.mean(spectra_to_plot, axis=0)
+                plot_title = f"{title} (Averaged from {len(spectra_to_plot)} blocks)"
+            else:
+                averaged_spectrum = spectra_to_plot[0]
+                plot_title = f"{title} (Block {selected_blocks[0]})"
+
+            # Create plot
+            ax = self.curve_figure.add_subplot(111)
+            ax.plot(V, averaged_spectrum, 'b-', linewidth=1.5)
+            ax.set_xlabel('Voltage (V)', fontsize=10)
+            ax.set_ylabel(ylabel, fontsize=10)
+            ax.set_title(plot_title, fontsize=11, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(labelsize=9)
+
+            # Tight layout
+            self.curve_figure.tight_layout()
+            self.curve_canvas.draw()
+
+            logger.info(f"Plotted {curve_type} for {len(selected_blocks)} blocks")
+
+        except Exception as e:
+            logger.error(f"Error updating spectrum plot: {e}", exc_info=True)
+            self.show_message_on_plot(f"Error plotting curves:\n{str(e)}")
+
+    def show_message_on_plot(self, message: str):
+        """Show a message on the curve plot."""
+        self.curve_figure.clear()
+        ax = self.curve_figure.add_subplot(111)
+        ax.text(0.5, 0.5, message, ha='center', va='center', fontsize=11, color='red')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        self.curve_canvas.draw()
 
     def load_csv_file(self, filepath: Path):
         """Load CSV file."""
@@ -1694,10 +2037,5 @@ class MainWindow(QMainWindow):
 
     def export_to_csv(self):
         """Export to CSV."""
-        # Keep existing implementation
-        pass
-
-    def on_selection_changed(self):
-        """Handle selection changes."""
         # Keep existing implementation
         pass

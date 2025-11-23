@@ -118,7 +118,7 @@ class TopographyWidget(QWidget):
     def set_topography(self, topography: TopographyData):
         """
         Set topography data to display.
-        
+
         Parameters:
         -----------
         topography : TopographyData
@@ -126,22 +126,39 @@ class TopographyWidget(QWidget):
         """
         self.topography = topography
         self.selected_blocks = topography.selected_blocks.copy()
-        
+
         # Create pixmap from topography
         self.create_pixmap()
-        
+
         # Update display
+        self.update_display()
+        self.update_info()
+
+    def set_image(self, pixmap: QPixmap):
+        """
+        Set image directly without topography data.
+        Used for displaying imported images before discretization.
+
+        Parameters:
+        -----------
+        pixmap : QPixmap
+            Image to display
+        """
+        self.pixmap = pixmap
+        self.topography = None
+        self.selected_blocks = []
+        self.block_rects = {}
         self.update_display()
         self.update_info()
         
     def create_pixmap(self):
-        """Create QPixmap from topography data with block overlay."""
+        """Create QPixmap from topography data with optional block overlay."""
         if self.topography is None:
             return
-        
+
         # Convert to image
         img = self.topography.to_image(self.colormap)
-        
+
         # Convert PIL Image to QPixmap
         if img.mode == 'L':
             # Grayscale
@@ -152,110 +169,63 @@ class TopographyWidget(QWidget):
             height, width = self.topography.shape
             img_array = np.array(img)
             qimage = QImage(img_array.data, width, height, 3 * width, QImage.Format_RGB888)
-        
+
         self.pixmap = QPixmap.fromImage(qimage)
-        
-        # Always create block overlay for selection
-        self.create_block_overlay()
+
+        # Only create block overlay if topography has been discretized
+        if self.topography.discretized_data is not None:
+            self.create_block_overlay()
     
     def create_block_overlay(self):
         """Create overlay showing discretized blocks and selection."""
-        if self.topography is None:
+        if self.topography is None or self.topography.discretized_data is None:
             return
-        
+
         # Get dimensions
         orig_h, orig_w = self.topography.shape
-        
-        # If not discretized, create a default grid for selection
-        if self.topography.discretized_data is None:
-            # Use default block size or create sensible grid
-            block_size = min(orig_w // 10, orig_h // 10)  # Default to ~10 blocks per dimension
-            if block_size < 1:
-                block_size = 1
-                
-            n_blocks_w = orig_w // block_size
-            n_blocks_h = orig_h // block_size
-            
-            # Create painter
-            painter = QPainter(self.pixmap)
-            painter.setRenderHint(QPainter.Antialiasing)
-            
-            # Draw grid lines
-            pen = QPen(QColor(255, 255, 255, 150))  # Semi-transparent white
-            pen.setWidth(1)
-            painter.setPen(pen)
-            
-            # Clear block rectangles
-            self.block_rects = {}
-            
-            # CRITICAL: Draw blocks in H→V order (column-by-column) to match discretization
-            for j in range(n_blocks_w):  # Horizontal (columns) first
-                for i in range(n_blocks_h):  # Vertical (rows) second
-                    # Calculate block position
-                    y = i * block_size
-                    x = j * block_size
-                    h = min(block_size, orig_h - y)
-                    w = min(block_size, orig_w - x)
-                    
-                    # Draw rectangle
-                    rect = QRect(x, y, w, h)
-                    painter.drawRect(rect)
-                    
-                    # Store rectangle for hit detection
-                    # Use (j, i) to represent (horizontal_group, vertical_group)
-                    self.block_rects[(j, i)] = rect
-                    
-                    # Highlight selected blocks
-                    # Note: blocks are indexed as (h_group, v_group)
-                    if (j, i) in self.selected_blocks:
-                        brush = QBrush(self.selected_color)
-                        painter.fillRect(rect, brush)
-            
-            painter.end()
-            
-        else:
-            # Use actual discretization
-            block_v, block_h = self.topography.block_size
-            n_blocks_v, n_blocks_h = self.topography.discretized_data.shape
-            
-            # Create painter
-            painter = QPainter(self.pixmap)
-            painter.setRenderHint(QPainter.Antialiasing)
-            
-            # Draw grid lines
-            pen = QPen(QColor(255, 255, 255, 150))
-            pen.setWidth(1)
-            painter.setPen(pen)
-            
-            # Clear block rectangles
-            self.block_rects = {}
-            
-            # CRITICAL: Draw blocks in H→V order (column-by-column) to match discretization
-            # Block_0 is at (row=0, col=0), Block_1 at (row=1, col=0), etc.
-            for j in range(n_blocks_h):  # Horizontal groups (columns) first
-                for i in range(n_blocks_v):  # Vertical groups (rows) second
-                    # Calculate block position in image coordinates
-                    y = i * block_v
-                    x = j * block_h
-                    h = min(block_v, orig_h - y)
-                    w = min(block_h, orig_w - x)
-                    
-                    # Draw rectangle
-                    rect = QRect(x, y, w, h)
-                    painter.drawRect(rect)
-                    
-                    # Store rectangle for hit detection
-                    # Use (j, i) to represent (horizontal_group, vertical_group)
-                    # This matches the order used in discretization
-                    self.block_rects[(j, i)] = rect
-                    
-                    # Highlight selected blocks
-                    # Note: blocks are indexed as (h_group, v_group)
-                    if (j, i) in self.selected_blocks:
-                        brush = QBrush(self.selected_color)
-                        painter.fillRect(rect, brush)
-            
-            painter.end()
+
+        # Use actual discretization
+        block_v, block_h = self.topography.block_size
+        n_blocks_v, n_blocks_h = self.topography.discretized_data.shape
+
+        # Create painter
+        painter = QPainter(self.pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Draw grid lines
+        pen = QPen(QColor(255, 255, 255, 150))
+        pen.setWidth(1)
+        painter.setPen(pen)
+
+        # Clear block rectangles
+        self.block_rects = {}
+
+        # CRITICAL: Draw blocks in H→V order (column-by-column) to match discretization
+        # Block_0 is at (row=0, col=0), Block_1 at (row=1, col=0), etc.
+        for j in range(n_blocks_h):  # Horizontal groups (columns) first
+            for i in range(n_blocks_v):  # Vertical groups (rows) second
+                # Calculate block position in image coordinates
+                y = i * block_v
+                x = j * block_h
+                h = min(block_v, orig_h - y)
+                w = min(block_h, orig_w - x)
+
+                # Draw rectangle
+                rect = QRect(x, y, w, h)
+                painter.drawRect(rect)
+
+                # Store rectangle for hit detection
+                # Use (j, i) to represent (horizontal_group, vertical_group)
+                # This matches the order used in discretization
+                self.block_rects[(j, i)] = rect
+
+                # Highlight selected blocks
+                # Note: blocks are indexed as (h_group, v_group)
+                if (j, i) in self.selected_blocks:
+                    brush = QBrush(self.selected_color)
+                    painter.fillRect(rect, brush)
+
+        painter.end()
     
     def on_mouse_press(self, event: QMouseEvent):
         """Handle mouse click for block selection."""

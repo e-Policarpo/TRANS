@@ -136,13 +136,19 @@ class NanosurfSTSLoader(BaseDataLoader):
                     
                     concatenated_spectra.append(I_mean)
                     
-                    # Get voltage array
-                    V = np.array(stm_nid.data.Spec.Forward.get("Tip voltage",
-                                                              stm_nid.data.Spec.Forward.get("Voltage")))[0, :]
-                    
+                    # Get voltage array from metadata
+                    try:
+                        V = np.array(stm_nid.data.Spec.Forward.get("Tip voltage",
+                                                                  stm_nid.data.Spec.Forward.get("Voltage")))[0, :]
+                    except (IndexError, TypeError, AttributeError) as e:
+                        # Fallback: generate voltage array from metadata range
+                        logger.warning(f"Could not extract voltage array directly, generating from metadata: {e}")
+                        V = self._generate_voltage_array_from_metadata(stm_nid)
+
                     # Verify voltage consistency
                     if V_common is None:
                         V_common = V
+                        logger.info(f"Voltage range: [{V_common.min():.3f}, {V_common.max():.3f}] V ({len(V_common)} points)")
                     elif not np.allclose(V_common, V, rtol=1e-5):
                         logger.warning(f"Voltage array in {filepath.name} differs from others")
                 
@@ -365,5 +371,63 @@ class NanosurfSTSLoader(BaseDataLoader):
         
         except Exception as e:
             logger.debug(f"Could not extract dimensions from parameters: {e}")
-        
+
         return None
+
+    def _generate_voltage_array_from_metadata(self, stm_nid) -> np.ndarray:
+        """
+        Generate voltage array by arithmetic progression from metadata.
+
+        This is a fallback method when the voltage array cannot be extracted directly.
+        It generates a linearly spaced array based on V_min, V_max, and number of points.
+
+        Parameters:
+        -----------
+        stm_nid : NSFopen object
+            Loaded .nid file object
+
+        Returns:
+        --------
+        V : np.ndarray
+            Generated voltage array
+        """
+        try:
+            # Try to get voltage range from Spec parameters
+            if hasattr(stm_nid.data, 'Spec') and hasattr(stm_nid.data.Spec, 'Forward'):
+                # Get current data to determine number of points
+                I_data = np.array(stm_nid.data.Spec.Forward.get("Tip Current",
+                                                                stm_nid.data.Spec.Forward.get("Current")))
+                n_points = I_data.shape[-1]  # Last dimension is voltage points
+
+                # Try to extract voltage range from parameters
+                if hasattr(stm_nid, 'param'):
+                    params = stm_nid.param
+
+                    # Look for voltage range parameters
+                    v_min = None
+                    v_max = None
+
+                    for min_key in ['V_min', 'Vmin', 'VoltageMin', 'StartVoltage', 'Spec_V_min']:
+                        if min_key in params:
+                            v_min = float(params[min_key])
+                            break
+
+                    for max_key in ['V_max', 'Vmax', 'VoltageMax', 'EndVoltage', 'Spec_V_max']:
+                        if max_key in params:
+                            v_max = float(params[max_key])
+                            break
+
+                    if v_min is not None and v_max is not None:
+                        # Generate linearly spaced voltage array
+                        V = np.linspace(v_min, v_max, n_points)
+                        logger.info(f"Generated voltage array: [{v_min}, {v_max}] V ({n_points} points)")
+                        return V
+
+            # If all else fails, create a generic array
+            logger.warning("Could not find voltage range in metadata, using generic array")
+            return np.arange(n_points) if 'n_points' in locals() else np.arange(100)
+
+        except Exception as e:
+            logger.error(f"Error generating voltage array from metadata: {e}")
+            # Last resort: return a generic array
+            return np.arange(100)
